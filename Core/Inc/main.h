@@ -67,12 +67,14 @@ void Error_Handler(void);
 #define MAG_TX_GPIO_Port GPIOA
 #define MAG_RX_Pin GPIO_PIN_3
 #define MAG_RX_GPIO_Port GPIOA
-#define MOTOR1_SIG1_Pin GPIO_PIN_5
+#define MOTOR1_SIG1_Pin GPIO_PIN_4
 #define MOTOR1_SIG1_GPIO_Port GPIOA
-#define MOTOR2_SIG1_Pin GPIO_PIN_6
+#define MOTOR2_SIG1_Pin GPIO_PIN_5
 #define MOTOR2_SIG1_GPIO_Port GPIOA
-#define MOTOR1_SIG2_Pin GPIO_PIN_7
+#define MOTOR1_SIG2_Pin GPIO_PIN_6
 #define MOTOR1_SIG2_GPIO_Port GPIOA
+#define MOTOR2_SIG2_Pin GPIO_PIN_7
+#define MOTOR2_SIG2_GPIO_Port GPIOA
 #define LED1_Pin GPIO_PIN_13
 #define LED1_GPIO_Port GPIOB
 #define INFO_TX_Pin GPIO_PIN_9

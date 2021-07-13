@@ -39,8 +39,12 @@
 #define COMMAND_BUFFER_SIZE 256 
 #define MOTOR_NUM 2
 #define FULL_PULSE 100
+#define DELTA_PULSE 1
 #define MAG_BUFFER_LEN 9
 #define CARD_BUFFER_LEN 16
+#define huart_info huart1
+#define huart_mag huart2
+#define huart_rfid huart3
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -78,9 +82,17 @@ GPIO_TypeDef* motor_sig_port[MOTOR_NUM][2] = {{MOTOR1_SIG1_GPIO_Port, MOTOR1_SIG
 																							{MOTOR2_SIG1_GPIO_Port, MOTOR2_SIG2_GPIO_Port}};
 uint16_t motor_sig_pin[MOTOR_NUM][2] = {{MOTOR1_SIG1_Pin, MOTOR1_SIG2_Pin},
 																				{MOTOR2_SIG1_Pin, MOTOR2_SIG2_Pin}};
+// stop & speed
+uint8_t moving_status = 0; // 0 for break; 1 for forward; 2 for backward; 3 for turn left; 4 for turn right;
+uint8_t forward_speed = 0;
 // site
 uint8_t target_site = 0;
-
+// pid
+int16_t PID_previous_error = 0;
+int16_t PID_integral = 0;
+float Kp=0.1;
+float Ki=0.01;
+float Kd=0.05;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -94,10 +106,18 @@ static void MX_NVIC_Init(void);
 /* USER CODE BEGIN 0 */
 int fputc(int ch, FILE *f){
 	uint8_t temp[1] = {ch};
-	HAL_UART_Transmit(&huart1, temp, 1, 2); // modify huart1 in need
+	HAL_UART_Transmit(&huart_info, temp, 1, 2); // modify huart_info in need
 	return ch;
 }
 
+int atoi(char* source){
+	int length = strlen(source);
+	int sum = 0;
+	for(int i=0;i<length;i++){
+		sum = sum*10 + (source[i]-'0');
+	}
+	return sum;
+}
 /* USER CODE END 0 */
 
 /**
@@ -142,9 +162,9 @@ int main(void)
 		HAL_TIM_PWM_Start(&htim2, channel_motor[i]); // enable PWM2 channel
 	}
 	HAL_TIM_Base_Start_IT(&htim3); // enable timer3 interrupt
-	HAL_UART_Receive_IT(&huart1, infoBuffer, 1); //enable usart1 reveive
-	HAL_UART_Receive_IT(&huart3, cardBuffer, CARD_BUFFER_LEN); //enable card usart reveive
-	HAL_UART_Receive_IT(&huart2, magBuffer, MAG_BUFFER_LEN); //enable mag usart reveive
+	HAL_UART_Receive_IT(&huart_info, infoBuffer, 1); //enable usart1 reveive
+	HAL_UART_Receive_IT(&huart_rfid, cardBuffer, CARD_BUFFER_LEN); //enable card usart reveive
+	HAL_UART_Receive_IT(&huart_mag, magBuffer, MAG_BUFFER_LEN); //enable mag usart reveive
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -241,7 +261,7 @@ void LogicSwitch(uint8_t motor_id, int8_t logic){
 	}
 }
 void ModifyPulse(uint8_t motor_id, int16_t pulse){
-	pulse = max(50-FULL_PULSE, min(pulse, FULL_PULSE-50));
+	pulse = max(DELTA_PULSE-FULL_PULSE, min(pulse, FULL_PULSE-DELTA_PULSE));
 	pulse_motor[motor_id] = pulse;
 	LogicSwitch(motor_id, pulse>0?2:3);
 	user_main_printf("[\thandleCmd]ModifyPulse: %d!", pulse);
@@ -259,59 +279,78 @@ void MotorHang(){
 	}
 }
 void MotorOn(){
+	moving_status = 1;
 	for(uint8_t i=0; i<MOTOR_NUM; ++i){
 		LogicSwitch(i, 2);
 	}
 }
 void MotorOff(){
+	moving_status = 0;
 	for(uint8_t i=0; i<MOTOR_NUM; ++i){
 		LogicSwitch(i, 0);
 	}
 }
 void MotorSpeedUp(){
 	for(uint8_t i=0; i<MOTOR_NUM; ++i){
-		SpeedUp(i, 100);
+		SpeedUp(i, DELTA_PULSE);
 	}
 }
 void MotorSlowDown(){
 	for(uint8_t i=0; i<MOTOR_NUM; ++i){
-		SlowDown(i, 100);
+		SlowDown(i, DELTA_PULSE);
 	}
 }
 void MotorTurnLeft(){
-	SlowDown(0, 1000);
-	SpeedUp(1, 1000);
+	moving_status = 3;
+	SlowDown(0, 5*DELTA_PULSE);
+	SpeedUp(1, 5*DELTA_PULSE);
 }
 void MotorTurnRight(){
-	SlowDown(1, 1000);
-	SpeedUp(2, 1000);
+	moving_status = 4;
+	SpeedUp(0, 5*DELTA_PULSE);
+	SlowDown(1, 5*DELTA_PULSE);
 }
-void MagneticGuide(uint8_t magnetic_status){
-	uint8_t magbits[8];
-	uint8_t mask = 0x01;
-	uint8_t a4=0, b4=0;
-	for(uint8_t i=0; i<8; ++i){
-		magbits[i] = magnetic_status & mask;
-		mask = mask<<1;
-		if(magbits[i]!=0){
-			if(i<4){
-				a4++;
-			}else{
-				b4++;
-			}
-		}
-	}
-	if(a4==b4){
+void MagneticGuide(int8_t* magStatus){
+	if(moving_status == 0){ // stop status
 		return;
 	}
-	if(a4<b4){
-		MotorTurnRight();
+	uint8_t absMag[8] = {0};
+	for(uint16_t i=0; i<8; ++i){
+		absMag[i] = abs(magStatus[i]);
 	}
-	if(a4>b4){
-		MotorTurnLeft();
+	user_main_printf("[\thandleNVIC3]: read mag %d %d %d %d %d %d %d %d!", 
+									 magStatus[0], magStatus[1], magStatus[2], magStatus[3],
+									 magStatus[4], magStatus[5], magStatus[6], magStatus[7]);
+	int16_t measured_value = 0;
+	for(uint16_t i=0; i<4; ++i){
+		measured_value += absMag[i] - absMag[7-i];
 	}
-	
-	
+	//int16_t PID_error = 0 - measured_value;
+	//PID_integral = PID_integral + PID_error*1;
+	//int16_t PID_derivative = (PID_error - PID_previous_error) / 1;
+	//float PID_output = Kp*PID_error + Ki*PID_integral + Kd*PID_derivative;
+	//PID_previous_error = PID_error;
+	user_main_printf("[\tGuide]: output %d!", measured_value);
+	int16_t forward_thres = 20;
+	if(abs(measured_value)<forward_thres){
+		moving_status = 1; // forward
+		ModifyPulse(0, (int16_t)forward_speed);
+		ModifyPulse(1, (int16_t)forward_speed);
+	}
+	if(measured_value<-1*forward_thres){
+		if(moving_status!=3){ // turn left
+			moving_status = 3;
+			ModifyPulse(0, (int16_t)forward_speed-5*DELTA_PULSE);
+			ModifyPulse(1, (int16_t)forward_speed+5*DELTA_PULSE);
+		}
+	}
+	if(measured_value>forward_thres){
+		if(moving_status!=4){ // turn right
+			moving_status = 4;
+			ModifyPulse(0, (int16_t)forward_speed+5*DELTA_PULSE);
+			ModifyPulse(1, (int16_t)forward_speed-5*DELTA_PULSE);
+		}
+	}
 }
 
 
@@ -339,19 +378,26 @@ void handleCmd(void){
 			}
 			if(strcmp(cmdseg, "up")==0){
 				user_main_printf("[\thandleCmd]Handle Cmd: speed up!");
-				SpeedUp(mid, 100);
+				SpeedUp(mid, DELTA_PULSE);
 			}
 			if(strcmp(cmdseg, "down")==0){
 				user_main_printf("[\thandleCmd]Handle Cmd: slow down!");
-				SlowDown(mid, 100);
+				SlowDown(mid, DELTA_PULSE);
+			}
+			if(strcmp(cmdseg, "speed")==0){
+				user_main_printf("[\thandleCmd]Handle Cmd: set speed!");
+				forward_speed = atoi(idstr);
+				user_main_printf("[\thandleCmd]speed set to %d!", forward_speed);
 			}
 		}else{
 			if(strcmp(cmdseg, "stop")==0){
 				user_main_printf("[\thandleCmd]Handle Cmd: stop!");
+				moving_status = 0;
 				MotorOff();
 			}
 			if(strcmp(cmdseg, "start")==0){
 				user_main_printf("[\thandleCmd]Handle Cmd: start!");
+				moving_status = 1;
 				MotorOn();
 			}
 			if(strcmp(cmdseg, "left")==0){
@@ -399,41 +445,45 @@ void addCmdBuffer(uint8_t data)
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-	if(huart->Instance == USART1){
+	if(huart == &huart_info){
 		uint8_t data = infoBuffer[0];
 		addCmdBuffer(data);
-		HAL_UART_Receive_IT(&huart1, infoBuffer, 1);
+		HAL_UART_Receive_IT(&huart_info, infoBuffer, 1);
 	}
-	if(huart->Instance == USART3){
+	if(huart == &huart_rfid){
 		uint8_t card_id = cardBuffer[15];
 		user_main_printf("[\thandleNVIC2]: read card %d!", card_id);
 		if(card_id == target_site){
 			MotorOff();
 		}
-		HAL_UART_Receive_IT(&huart3, cardBuffer, CARD_BUFFER_LEN);
+		HAL_UART_Receive_IT(&huart_rfid, cardBuffer, CARD_BUFFER_LEN);
 	}
-	if(huart->Instance == USART2){
-		user_main_printf("[\thandleNVIC3]:+++++ mag start +++++!");
-		int8_t magnetic_status = 0;
+	if(huart == &huart_mag){
+		// user_main_printf("[\thandleNVIC3]:+++++ mag start +++++!");
+		int8_t magStatus[8] = {0};
 		for(uint16_t i=0; i<8; ++i){
-			magnetic_status = magBuffer[i];
-			user_main_printf("[\thandleNVIC3]: read mag %d!", magnetic_status);
+			magStatus[i] = (int8_t)magBuffer[i];
 		}
-		user_main_printf("[\thandleNVIC3]:----- mag start -----!");
-		HAL_UART_Receive_IT(&huart2, magBuffer, MAG_BUFFER_LEN);
+		
+		MagneticGuide(magStatus);
+		//user_main_printf("[\thandleNVIC3]: read mag %d %d %d %d %d %d %d %d!", 
+		//									magStatus[0], magStatus[1], magStatus[2], magStatus[3],
+		//									 magStatus[4], magStatus[5], magStatus[6], magStatus[7]);
+		// user_main_printf("[\thandleNVIC3]:----- mag end -----!");
+		HAL_UART_Receive_IT(&huart_mag, magBuffer, MAG_BUFFER_LEN);
 	}
 }
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-	if(huart == &huart3)
+	if(huart == &huart_rfid)
 	{
 		__HAL_UNLOCK(huart);
-		HAL_UART_Receive_IT(&huart3, cardBuffer, CARD_BUFFER_LEN);
+		HAL_UART_Receive_IT(&huart_rfid, cardBuffer, CARD_BUFFER_LEN);
 	}
-	if(huart == &huart2)
+	if(huart == &huart_mag)
 	{
 		__HAL_UNLOCK(huart);
-		HAL_UART_Receive_IT(&huart2, magBuffer, MAG_BUFFER_LEN);
+		HAL_UART_Receive_IT(&huart_mag, magBuffer, MAG_BUFFER_LEN);
 	}
 }
 
@@ -443,9 +493,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
 	if (htim == (&htim3))
 	{
-		uint8_t mag_addr[1] = {0xC1};
-		HAL_UART_Transmit(&huart2, mag_addr, 1, 2); // send magnetic address
-		HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
+		if(moving_status!=0){
+			uint8_t mag_addr[1] = {0xC1};
+			HAL_UART_Transmit(&huart_mag, mag_addr, 1, 2); // send magnetic address
+			HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
+		}
 	}
 }
 /* USER CODE END 4 */
